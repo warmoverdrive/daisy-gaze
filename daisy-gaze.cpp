@@ -7,14 +7,18 @@ using namespace daisy;
 using namespace daisysp;
 
 DaisySeed hw;
-ReverbSc verb;
+ReverbSc DSY_SDRAM_BSS verb;
+Chorus DSY_SDRAM_BSS chorus;
+
+u_int8_t counter;
 
 enum controls
 {
-	feedback = 0,
-	lpf,
+	feedback,
+	depth,
 	blend,
 	vol,
+	fun,
 	END_CONTROLS
 };
 
@@ -38,17 +42,25 @@ void AudioCallback(AudioHandle::InterleavingInputBuffer in,
 {
 	float dry, wet, mix;
 
-	ProcessAnalogControls();
-
-	verb.SetFeedback(param[feedback].Value());
-	verb.SetLpFreq(param[lpf].Value());
+	if (counter == 0)
+	{
+		ProcessAnalogControls();
+		verb.SetFeedback(param[feedback].Value());
+		chorus.SetFeedback(param[depth].Value());
+		chorus.SetLfoFreq(param[fun].Value());
+	}
+	counter++;
+	if (counter > 15)
+		counter = 0;
 
 	// loop through each sample in block
 	for (size_t i = 0; i < size; i += 2)
 	{
 		dry = in[i];
 
-		verb.Process(dry, 0, &wet, 0);
+		verb.Process(chorus.Process(dry), 0, &wet, 0);
+
+		wet *= 1.5f; // chorus quiets the dry signal heavily
 
 		// blend the dry and wet by multiplying by the 0.0f -> 1.0f value to get
 		// a percentage total. max dry is at a 0.0f value of the blend param, while
@@ -74,30 +86,37 @@ void InitAnalogControls()
 {
 	AdcChannelConfig cfg[END_CONTROLS];
 
-	cfg[vol].InitSingle(hw.GetPin(15));		 // pin 22
-	cfg[blend].InitSingle(hw.GetPin(16));	 // pin 23
-	cfg[feedback].InitSingle(hw.GetPin(21)); // pin 28
-	cfg[lpf].InitSingle(hw.GetPin(22));		 // pin 29
+	cfg[vol].InitSingle(hw.GetPin(15));		 // pin 22 blue
+	cfg[blend].InitSingle(hw.GetPin(16));	 // pin 23 red
+	cfg[feedback].InitSingle(hw.GetPin(21)); // pin 28 white
+	cfg[depth].InitSingle(hw.GetPin(22));	 // pin 29 yellow
+	cfg[fun].InitSingle(hw.GetPin(17));		 // pin 24
 	hw.adc.Init(cfg, END_CONTROLS);
 
 	for (int i = 0; i < END_CONTROLS; i++) // Wrap in AnalogControl objects
 		knobs[i].Init(hw.adc.GetPtr(i), hw.AudioCallbackRate());
 
 	// Wrap in Parameter objects, with mapped values and interpolation curves
-	param[vol].Init(knobs[vol], 0.0f, 3.0f, Parameter::LOGARITHMIC);
+	param[vol].Init(knobs[vol], 0.0f, 3.0f, Parameter::LINEAR);
 	param[blend].Init(knobs[blend], 0.0f, 1.0f, Parameter::LINEAR);
-	param[feedback].Init(knobs[feedback], 0.6f, 0.999f, Parameter::LOGARITHMIC);
-	param[lpf].Init(knobs[lpf], 500.0f, 12000.0f, Parameter::LOGARITHMIC);
+	param[feedback].Init(knobs[feedback], 0.75f, 0.999f, Parameter::LINEAR);
+	param[depth].Init(knobs[depth], 0.0f, 1.0f, Parameter::LINEAR);
+	param[fun].Init(knobs[fun], 0.00001f, 1.0f, Parameter::LINEAR);
 
 	hw.adc.Start();
 }
 
 int main(void)
 {
+	counter = 0;
 	hw.Init();
 	hw.SetAudioBlockSize(4); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	verb.Init(hw.AudioSampleRate());
+
+	chorus.Init(hw.AudioSampleRate());
+	chorus.SetDelay(1.0f);
+	chorus.SetLfoDepth(1.0f);
 
 	InitAnalogControls();
 
