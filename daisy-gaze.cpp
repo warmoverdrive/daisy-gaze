@@ -9,6 +9,7 @@ using namespace daisysp;
 DaisySeed hw;
 ReverbSc DSY_SDRAM_BSS verb;
 Chorus DSY_SDRAM_BSS chorus;
+CrossFade cFadeFinal, cFadeMod;
 
 u_int8_t counter;
 
@@ -18,7 +19,8 @@ enum controls
 	depth,
 	blend,
 	vol,
-	fun,
+	chrsFreq,
+	modBlend,
 	END_CONTROLS
 };
 
@@ -27,45 +29,64 @@ Parameter param[END_CONTROLS];
 
 /**
  * @brief
- * Helper function for processing all inputs for later use.
+ * Helper function for processing all control inputs and applying values.
+ * Sequentially polls an input per callback.
  * Use at top of AudioCallback.
  */
 void ProcessAnalogControls()
 {
-	for (int i = 0; i < END_CONTROLS; i++)
-		param[i].Process();
+	// check to reset counter
+	counter = counter >= controls::END_CONTROLS ? 0 : counter;
+
+	// every sample a new param is processed to split duties
+	switch (counter)
+	{
+	case controls::feedback:
+		verb.SetFeedback(param[feedback].Process());
+		break;
+	case controls::depth:
+		chorus.SetLfoDepth(param[depth].Process());
+		break;
+	case controls::blend:
+		cFadeFinal.SetPos(param[blend].Process());
+		break;
+	case controls::vol:
+		param[vol].Process();
+		break;
+	case controls::chrsFreq:
+		chorus.SetLfoFreq(param[chrsFreq].Process());
+		break;
+	case controls::modBlend:
+		cFadeMod.SetPos(param[modBlend].Process());
+		break;
+	}
+
+	counter++;
 }
 
 void AudioCallback(AudioHandle::InterleavingInputBuffer in,
 				   AudioHandle::InterleavingOutputBuffer out,
 				   size_t size)
 {
-	float dry, wet, mix;
+	float dry, wetRvb, wetChr, mix;
 
-	if (counter == 0)
-	{
-		ProcessAnalogControls();
-		verb.SetFeedback(param[feedback].Value());
-		chorus.SetFeedback(param[depth].Value());
-		chorus.SetLfoFreq(param[fun].Value());
-	}
-	counter++;
-	if (counter > 15)
-		counter = 0;
+	ProcessAnalogControls();
 
 	// loop through each sample in block
 	for (size_t i = 0; i < size; i += 2)
 	{
 		dry = in[i];
 
-		verb.Process(chorus.Process(dry), 0, &wet, 0);
+		verb.Process(dry, 0, &wetRvb, 0);
 
-		wet *= 1.5f; // chorus quiets the dry signal heavily
+		wetChr = chorus.Process(wetRvb);
 
-		// blend the dry and wet by multiplying by the 0.0f -> 1.0f value to get
-		// a percentage total. max dry is at a 0.0f value of the blend param, while
-		// max wet is at 1.0f.
-		mix = (dry * (1 - param[blend].Value())) + (wet * param[blend].Value());
+		// crossfade modulation amount
+		// todo set up modulating delay line
+		mix = cFadeMod.Process(wetRvb, wetChr);
+
+		// use a crossfade to blend evenly between the dry and wet signals without changing volume
+		mix = cFadeFinal.Process(dry, mix);
 
 		// mono output, with volume controler as a boost/cut.
 		// mess with the Parameter min/max values here cause
@@ -90,7 +111,8 @@ void InitAnalogControls()
 	cfg[blend].InitSingle(hw.GetPin(16));	 // pin 23 red
 	cfg[feedback].InitSingle(hw.GetPin(21)); // pin 28 white
 	cfg[depth].InitSingle(hw.GetPin(22));	 // pin 29 yellow
-	cfg[fun].InitSingle(hw.GetPin(17));		 // pin 24
+	cfg[chrsFreq].InitSingle(hw.GetPin(17)); // pin 24
+	cfg[modBlend].InitSingle(hw.GetPin(18)); // pin 25
 	hw.adc.Init(cfg, END_CONTROLS);
 
 	for (int i = 0; i < END_CONTROLS; i++) // Wrap in AnalogControl objects
@@ -101,7 +123,8 @@ void InitAnalogControls()
 	param[blend].Init(knobs[blend], 0.0f, 1.0f, Parameter::LINEAR);
 	param[feedback].Init(knobs[feedback], 0.75f, 0.999f, Parameter::LINEAR);
 	param[depth].Init(knobs[depth], 0.0f, 1.0f, Parameter::LINEAR);
-	param[fun].Init(knobs[fun], 0.00001f, 1.0f, Parameter::LINEAR);
+	param[chrsFreq].Init(knobs[chrsFreq], 0.00001f, 1.0f, Parameter::LINEAR);
+	param[modBlend].Init(knobs[modBlend], 0.0f, 0.75f, Parameter::LINEAR);
 
 	hw.adc.Start();
 }
@@ -110,13 +133,16 @@ int main(void)
 {
 	counter = 0;
 	hw.Init();
-	hw.SetAudioBlockSize(4); // number of samples handled per callback
+	hw.SetAudioBlockSize(1); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	verb.Init(hw.AudioSampleRate());
 
 	chorus.Init(hw.AudioSampleRate());
-	chorus.SetDelay(1.0f);
-	chorus.SetLfoDepth(1.0f);
+	chorus.SetFeedback(0.4f);
+
+	// init crossfades with constant power curves
+	cFadeFinal.Init(CROSSFADE_CPOW);
+	cFadeMod.Init(CROSSFADE_CPOW);
 
 	InitAnalogControls();
 
